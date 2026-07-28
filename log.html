@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bot Log</title>
+<style>
+  body { background:#0f1923; color:#ccc; font-family:monospace; font-size:13px; margin:0; padding:10px; }
+  #bar { position:fixed; background: black; top: 0;width:100%; height:8%;display:flex; gap:6px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
+  button { background:#1d4ed8; color:#fff; border:none; padding:8px 14px; border-radius:4px; font-size:13px; cursor:pointer; }
+  button.stop  { background:#7f1d1d; }
+  button.clear { background:#222; color:#888; }
+  #status {position: fixed;right:3%;  font-size:11px; color:#555;  }
+  #log { white-space:pre-wrap; word-break:break-all; line-height:1.8; }
+  .w { color:#f5a623; }
+  .e { color:#ff4d4d; }
+  .s { color:#00e5a0; }
+  .i { color:#60a5fa; }
+  .m { color:#555;   }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button onclick="start()">▶ Start</button>
+  <button class="stop"  onclick="stop()">■ Stop</button>
+  <button class="clear" onclick="clearLog()">Clear</button>
+  <span id="status">Idle</span>
+</div>
+<div id="log"></div>
+
+<script>
+// ── GANTI DENGAN DOMAIN RAILWAY KAMU ──
+var BASE_URL = "https://SITUS.RAILWAY.KAMU.railway.app";
+// ──────────────────────────────────────
+
+var LIMIT = 200; // harus sama dengan limit di server
+var timer = null;
+
+function colorize(line) {
+  if (!line.trim()) return '\n';
+  var cls = '';
+  if      (line.includes('⚠️') || line.includes('skip'))                                               cls = 'w';
+  else if (line.includes('❌') || line.includes('⛔') || line.includes('Gagal'))                       cls = 'e';
+  else if (line.includes('✅') || line.includes('🎯') || line.includes('🔒') || line.includes('ORDER')) cls = 's';
+  else if (line.includes('📊') || line.includes('💧') || line.includes('📈') || line.includes('📉') || line.includes('🚀')) cls = 'i';
+  else if (line.includes('⏳') || line.includes('🗑️') || line.includes('🔄') || line.includes('📭')) cls = 'm';
+  var safe = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return cls ? '<span class="'+cls+'">'+safe+'</span>\n' : safe+'\n';
+}
+
+function setStatus(txt, color) {
+  var el = document.getElementById('status');
+  el.textContent = txt;
+  el.style.color = color || '#555';
+}
+
+function start() {
+  stop();
+  fetchLog();
+  timer = setInterval(fetchLog, 3000);
+  setStatus('● Live', '#00e5a0');
+}
+
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  setStatus('Stopped', '#555');
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+}
+
+function fetchLog() {
+  fetch(BASE_URL + '/logs', { cache: 'no-store' })
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    })
+    .then(function(text) {
+      var el = document.getElementById('log');
+      var html = '';
+      text.split('\n').forEach(function(line) {
+        html += colorize(line);
+      });
+      // Replace seluruh isi — server sudah batasi 200 baris
+      el.innerHTML = html;
+      window.scrollTo(0, document.body.scrollHeight);
+    })
+    .catch(function(err) {
+      setStatus('Error: ' + err.message, '#ff4d4d');
+    });
+}
+
+start();
+</script>
+</body>
+</html>

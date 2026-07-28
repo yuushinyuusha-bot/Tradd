@@ -1,0 +1,1 @@
+WR kecil
