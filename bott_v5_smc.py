@@ -4306,7 +4306,7 @@ def run_bot():
                         if mdir is None:
                             sub_status = f"cari IDM-m5 (kandidat:{mid})"
                         else:
-                            label = "CHoCH" if mdir == stype else "BOS-m5"
+                            label = "CHoCH" if mdir == d else "BOS-m5"
                             sub_status = f"{label} break={mbrk} ujung={muj} terjauh={mtj}"
                         print(f"   {c} [{d}] (struct){watch_tag}: {sub_status} @ {ent} | "
                               f"H1 break:{bk} CHOCH:{ch} puncak:{pk} IDM:{idm}")
