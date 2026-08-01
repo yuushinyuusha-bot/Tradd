@@ -3662,6 +3662,7 @@ def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_d
         'm5_bos_break': None, 'm5_bos_ujung': None, 'm5_bos_break_ts': None,
         'm5_bos_ujung_ts': None, 'm5_bos_terjauh': None, 'm5_bos_fix_ts': None,
         'm5_bos_terjauh_ts': None,
+        'm5_idm_logged': set(),
         'm5_choch_invalid_after_ts': None,
     }
     return setup, logline
@@ -3745,22 +3746,51 @@ def _idm_find_strong_break(df, start_i, break_lvl_init, direction, lvl_idx_init=
     return lvl, lvl_idx, i   # i == n: belum ketemu (butuh candle lebih banyak)
 
 
-def _idm_chain_scan(df, start_i, break_lvl_init, direction, trigger_allowed_from_i=None):
+def _make_idm_log_fn(setup, coin, stype, opp, prefix=""):
+    """Buat callback log_fn utk _idm_chain_scan dengan DEDUP — supaya IDM yang sama tidak di-log
+    berulang tiap siklus (fungsi dipanggil ulang dari start_i yang sama tiap siklus sampai hasil
+    final ditemukan). Dedup key = (break_ts, event) — unik per IDM per jenis event."""
+    logged = setup.setdefault('m5_idm_logged', set())
+    def log_fn(idm_no, break_lvl, break_ts, ujung_lvl, ujung_ts, event):
+        key = (round(break_ts), round(ujung_ts) if ujung_ts else None, event)
+        if key in logged:
+            return
+        logged.add(key)
+        if event == 'formed':
+            log_entry(f"   {coin} {stype} (struct): {prefix}IDM-{idm_no} {opp} ditemukan — "
+                      f"break={break_lvl:.6g} ({_ts_wib(break_ts)}) ujung={ujung_lvl:.6g} "
+                      f"({_ts_wib(ujung_ts)}) — tunggu ujung tersentuh atau IDM baru terbentuk")
+        elif event == 'touched':
+            log_entry(f"   {coin} {stype} (struct): {prefix}IDM-{idm_no} {opp} — ujung IDM sebelumnya "
+                      f"({ujung_lvl:.6g} @ {_ts_wib(ujung_ts)}) tersentuh — break IDM-{idm_no} "
+                      f"({break_lvl:.6g} @ {_ts_wib(break_ts)}) jadi patokan terjauh utk struktur berikutnya")
+    return log_fn
+
+
+def _idm_chain_scan(df, start_i, break_lvl_init, direction, trigger_allowed_from_i=None, log_fn=None, idm_counter_start=1):
     """Jalankan RANTAI IDM (break diperdalam terus, geser ke IDM berikutnya tiap kali break lama
     tertembus) MULAI dari start_i, sampai salah satu dari:
       a) IDM aktif saat ini ujungnya MENYENTUH ujung IDM sebelumnya, DAN index candle penyentuh itu
          >= trigger_allowed_from_i (kalau None, selalu diizinkan) -> return dict 'trigger'.
       b) Data habis (belum ketemu apapun, butuh candle lebih banyak) -> return None (caller 'keep').
     direction: arah IDM ini ('Short'=cari break rendah dulu, 'Long'=cari break tinggi dulu) — SAMA
-    dengan arah 'opp' selalu (IDM selalu searah opp, sesuai desain: yang dicari IDM utk BOS-m5 opp)."""
+    dengan arah 'opp' selalu (IDM selalu searah opp, sesuai desain: yang dicari IDM utk BOS-m5 opp).
+    log_fn(idm_no, break_lvl, break_ts, ujung_lvl, ujung_ts, event): callback opsional dipanggil
+    setiap kali sebuah IDM (break+ujung) selesai diproses dalam rantai — 'event' salah satu dari
+    'formed' (IDM ke-N ketemu, break+ujung sudah ada, tunggu ujung tersentuh/IDM baru terbentuk) atau
+    'touched' (ujung IDM ke-N tersentuh -> trigger, break IDM ke-N ini jadi 'terjauh' acuan)."""
     n = len(df)
     break_lvl, break_idx, retrace_i = _idm_find_strong_break(df, start_i, break_lvl_init, direction)
     if retrace_i >= n:
         return None   # break pertama belum ketemu — butuh candle lebih banyak
     prev_ujung = None; prev_ujung_idx = None
+    idm_no = idm_counter_start
     while True:
         ujung_lvl = float(df['high'].iloc[retrace_i] if direction == 'Short' else df['low'].iloc[retrace_i])
         ujung_idx = retrace_i
+        if log_fn is not None:
+            log_fn(idm_no, break_lvl, float(df['ts'].iloc[break_idx]), ujung_lvl,
+                   float(df['ts'].iloc[ujung_idx]), 'formed')
         j = retrace_i + 1
         tertembus_j = None
         touched_prev_j = None
@@ -3779,16 +3809,20 @@ def _idm_chain_scan(df, start_i, break_lvl_init, direction, trigger_allowed_from
                 ujung_idx = j
             j += 1
         if touched_prev_j is not None:
+            if log_fn is not None:
+                log_fn(idm_no, break_lvl, float(df['ts'].iloc[break_idx]), prev_ujung,
+                       float(df['ts'].iloc[prev_ujung_idx]), 'touched')
             return {'kind': 'trigger', 'idm_break': break_lvl, 'idm_break_idx': break_idx,
                     'idm_ujung': prev_ujung, 'ujung_idx': prev_ujung_idx, 'trigger_idx': touched_prev_j,
                     'trigger_ts': float(df['ts'].iloc[touched_prev_j])}
         if tertembus_j is None:
             return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': ujung_lvl,
-                    'ujung_idx': ujung_idx}   # IDM aktif saat ini, belum ada trigger, butuh candle lagi
+                    'ujung_idx': ujung_idx, 'idm_no': idm_no}   # IDM aktif, blm ada trigger, butuh candle lagi
         prev_ujung = ujung_lvl; prev_ujung_idx = ujung_idx
         break_lvl, break_idx, retrace_i = _idm_find_strong_break(df, tertembus_j, float(df['low'].iloc[tertembus_j] if direction == 'Short' else df['high'].iloc[tertembus_j]), direction)
+        idm_no += 1
         if retrace_i >= n:
-            return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': None, 'ujung_idx': None}
+            return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': None, 'ujung_idx': None, 'idm_no': idm_no}
 
 
 def process_struct_setup(coin, setup, df_m5):
@@ -3854,6 +3888,32 @@ def process_struct_setup(coin, setup, df_m5):
     if setup['phase'] == 'WAIT_M5_CHOCH':
         scan_ts = setup['m5_scan_from_ts']
 
+        # ── INVALIDASI H1: entry hanya boleh terjadi selama harga masih di antara ujung BOS H1
+        #    (choch_level) dan puncak BOS H1 (peak_val). Cek SETIAP siklus (bukan cuma sekali di
+        #    transisi awal) — kalau salah satu levelnya tersentuh (wick M5) kapanpun sejak IDM-H1
+        #    tersentuh, artinya struktur H1 sudah berubah (CHoCH H1 atau trend H1 lanjut lewat
+        #    puncak lama) -> BUANG setup ini sepenuhnya, biar main loop re-deteksi BOS H1 yang baru.
+        choch_h1 = setup.get('choch_level'); peak_h1 = setup.get('peak_val')
+        idxs_h1chk = df_m5.index[(df_m5['ts'] >= scan_ts) & (df_m5.index < closed_end)]
+        if len(idxs_h1chk) > 0:
+            df_h1chk = df_m5.loc[idxs_h1chk]
+            lo_min = float(df_h1chk['low'].min()); hi_max = float(df_h1chk['high'].max())
+            invalid_reason = None
+            if stype == 'Long':
+                if choch_h1 is not None and lo_min <= float(choch_h1):
+                    invalid_reason = f"ujung BOS H1 ({choch_h1:.6g}) tersentuh (low={lo_min:.6g}) — CHoCH H1"
+                elif peak_h1 is not None and hi_max > float(peak_h1):
+                    invalid_reason = f"puncak BOS H1 ({peak_h1:.6g}) tersentuh/lewat (high={hi_max:.6g}) — trend H1 lanjut"
+            else:
+                if choch_h1 is not None and hi_max >= float(choch_h1):
+                    invalid_reason = f"ujung BOS H1 ({choch_h1:.6g}) tersentuh (high={hi_max:.6g}) — CHoCH H1"
+                elif peak_h1 is not None and lo_min < float(peak_h1):
+                    invalid_reason = f"puncak BOS H1 ({peak_h1:.6g}) tersentuh/lewat (low={lo_min:.6g}) — trend H1 lanjut"
+            if invalid_reason is not None:
+                log_entry(f"🚫 {coin} {stype} (struct): {invalid_reason} — BOS H1 sudah tidak valid, "
+                          f"batalkan monitoring M5. Tunggu BOS H1 baru terdeteksi.")
+                return 'remove'
+
         # ── BOS belum ada sama sekali -> cari BOS PERTAMA: rantai IDM dari scan_ts, TANPA batasan
         #    trigger (belum ada BOS luar sama sekali, jadi trigger pertama yg ketemu langsung dipakai).
         if setup.get('m5_bos_break') is None:
@@ -3864,7 +3924,8 @@ def process_struct_setup(coin, setup, df_m5):
             df_win = df_m5.iloc[start_i:closed_end].reset_index(drop=True)
             if len(df_win) < 2:
                 return 'keep'
-            res = _idm_chain_scan(df_win, 1, float(df_win['low'].iloc[0] if opp == 'Short' else df_win['high'].iloc[0]), opp, trigger_allowed_from_i=None)
+            log_fn = _make_idm_log_fn(setup, coin, stype, opp)
+            res = _idm_chain_scan(df_win, 1, float(df_win['low'].iloc[0] if opp == 'Short' else df_win['high'].iloc[0]), opp, trigger_allowed_from_i=None, log_fn=log_fn)
             if res is None:
                 return 'keep'
             if res['kind'] == 'pending':
@@ -3901,8 +3962,10 @@ def process_struct_setup(coin, setup, df_m5):
             setup['m5_bos_break_ts'] = bos_break_ts
             setup['m5_bos_ujung_ts'] = bos_ujung_ts
             setup['m5_bos_terjauh'] = None
-            log_entry(f"🧱 {coin} {stype} (struct): BOS-m5 {opp} kandidat — break={bos_break:.6g} "
-                      f"ujung={bos_ujung:.6g} @ {_ts_wib(bos_break_ts)} — cari IDM di dalamnya utk fix terjauh")
+            log_entry(f"🧱 {coin} {stype} (struct): BOS-m5 {opp} TERBENTUK — "
+                      f"break={bos_break:.6g} ({_ts_wib(bos_break_ts)}) "
+                      f"ujung={bos_ujung:.6g} ({_ts_wib(bos_ujung_ts)}) — "
+                      f"mulai cari IDM dari ujung-break utk fix terjauh")
             return 'keep'
 
         bos_break = setup['m5_bos_break']; bos_ujung = setup['m5_bos_ujung']
@@ -3928,7 +3991,8 @@ def process_struct_setup(coin, setup, df_m5):
             # trigger_allowed_from_i: index LOKAL (relatif df_win) yg berkorespondensi dgn bos_break_ts
             idx_brk_local = df_win.index[df_win['ts'] >= bos_break_ts]
             trigger_allowed_from_i = int(idx_brk_local[0]) if len(idx_brk_local) > 0 else None
-            res = _idm_chain_scan(df_win, 1, float(df_win['low'].iloc[0] if opp == 'Short' else df_win['high'].iloc[0]), opp, trigger_allowed_from_i=trigger_allowed_from_i)
+            log_fn = _make_idm_log_fn(setup, coin, stype, opp, prefix="dalam-BOS ")
+            res = _idm_chain_scan(df_win, 1, float(df_win['low'].iloc[0] if opp == 'Short' else df_win['high'].iloc[0]), opp, trigger_allowed_from_i=trigger_allowed_from_i, log_fn=log_fn)
             if res is None:
                 return 'keep'
             if res['kind'] == 'pending':
@@ -3988,6 +4052,12 @@ def process_struct_setup(coin, setup, df_m5):
             #    ujung=terjauh (level asli @ terjauh_ts). Cari RBS/SBR dari window UJUNG-BREAK CHoCH
             #    itu sendiri: dari terjauh_ts (bukan fix_ts) sampai titik CHoCH break ini. ──
             choch_break_ts = float(df_after['ts'].iloc[choch_i])
+            _choch_key = ('choch_pecah', round(choch_break_ts))
+            if _choch_key not in setup['m5_idm_logged']:
+                setup['m5_idm_logged'].add(_choch_key)
+                log_entry(f"⚡ {coin} {stype} (struct): CHoCH PECAH — break={bos_ujung:.6g} "
+                          f"({_ts_wib(choch_break_ts)}) ujung={terjauh:.6g} ({_ts_wib(terjauh_ts)}) — "
+                          f"mulai cari RBS/SBR dari ujung-break")
             idxs_rbs = df_m5.index[(df_m5['ts'] >= terjauh_ts) & (df_m5['ts'] <= choch_break_ts)]
             df_rbs_seg = df_m5.loc[idxs_rbs].reset_index(drop=True)
             rbs = _find_m5_rbs(df_rbs_seg, stype) if len(df_rbs_seg) >= 3 else None
@@ -4040,6 +4110,32 @@ def process_struct_setup(coin, setup, df_m5):
     # ── WAIT_FILL: limit sudah terpasang, tunggu fill ──
     if setup['phase'] == 'WAIT_FILL':
         oid = setup.get('order_id')
+        # ── INVALIDASI H1: selama limit BELUM terisi, entry cuma valid kalau harga masih di antara
+        #    ujung dan puncak BOS H1. Kalau salah satunya tersentuh -> cancel order & buang setup. ──
+        choch_h1 = setup.get('choch_level'); peak_h1 = setup.get('peak_val')
+        scan_ts = setup.get('m5_scan_from_ts')
+        if scan_ts is not None and (choch_h1 is not None or peak_h1 is not None):
+            idxs_h1chk = df_m5.index[(df_m5['ts'] >= scan_ts) & (df_m5.index < closed_end)]
+            if len(idxs_h1chk) > 0:
+                df_h1chk = df_m5.loc[idxs_h1chk]
+                lo_min = float(df_h1chk['low'].min()); hi_max = float(df_h1chk['high'].max())
+                invalid_reason = None
+                if stype == 'Long':
+                    if choch_h1 is not None and lo_min <= float(choch_h1):
+                        invalid_reason = f"ujung BOS H1 ({choch_h1:.6g}) tersentuh (low={lo_min:.6g})"
+                    elif peak_h1 is not None and hi_max > float(peak_h1):
+                        invalid_reason = f"puncak BOS H1 ({peak_h1:.6g}) tersentuh/lewat (high={hi_max:.6g})"
+                else:
+                    if choch_h1 is not None and hi_max >= float(choch_h1):
+                        invalid_reason = f"ujung BOS H1 ({choch_h1:.6g}) tersentuh (high={hi_max:.6g})"
+                    elif peak_h1 is not None and lo_min < float(peak_h1):
+                        invalid_reason = f"puncak BOS H1 ({peak_h1:.6g}) tersentuh/lewat (low={lo_min:.6g})"
+                if invalid_reason is not None:
+                    if oid:
+                        cancel_order(coin, oid)
+                    log_entry(f"🚫 {coin} {stype} (struct): {invalid_reason} — BOS H1 sudah tidak valid, "
+                              f"cancel limit order & batalkan setup.")
+                    return 'remove'
         if oid and not _order_was_filled(coin, oid):
             if _order_exists(coin, oid):
                 return 'lock'
