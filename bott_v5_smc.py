@@ -3554,7 +3554,7 @@ def _pick_fvg_backed_idm(legs, gaps, stype, df_h1_live=None, peak_idx=None):
     return None
 
 
-def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=None):
+def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=None, df_m5=None):
     """Deteksi BOS H1 terbaru -> FVG (WAJIB ADA) -> IDM (WAJIB, & harus leg yg tepat di bawahnya
     ada FVG asli) -> setup WAIT_IDM_TOUCH. BOS tanpa FVG dianggap LEMAH dan di-skip; begitu juga
     kalau semua leg IDM di pita ternyata di bawahnya cuma ketemu IDM lain (bukan FVG).
@@ -3628,6 +3628,40 @@ def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_d
         if verbose:
             print(f"   {coin}: (struct) BOS {stype} ada {len(inband_legs)} leg IDM di pita, tapi TAK ADA "
                   f"yg tepat di bawahnya FVG asli (semua cuma ketemu IDM lain) — BOS dianggap lemah, skip")
+        return None, None
+    # ── ANTI ENTRY-ULANG & FRESH-CHECK: kalau IDM yang kepilih SUDAH PERNAH dipakai utk entry
+    #    (inducement_done, bertahan lewat redeploy), ATAU levelnya SUDAH tersentuh oleh candle M5
+    #    kapanpun SETELAH candle puncak (peak_idx) H1 terbentuk (basi — "kesempatan" sudah lewat
+    #    sebelum bot sempat pantau live) -> BUANG leg itu dari daftar, coba leg IDM lain di pita yang
+    #    sama. Kalau semua leg gagal syarat ini -> BOS dianggap tidak punya IDM valid, skip (tunggu
+    #    BOS baru). Redeploy SEBELUM IDM sempat tersentuh (belum ada candle M5 stlh puncak yg
+    #    menyentuhnya) TETAP boleh dipakai — bukan basi.
+    remaining_legs = list(inband_legs)
+    peak_ts = its_hi   # timestamp candle puncak H1 (peak_idx) — acuan "setelah puncak"
+    while chosen is not None:
+        idm_lvl_cand = float(chosen[0])
+        sig = (round(swing_val, 10), round(choch_level, 10), round(idm_lvl_cand, 10))
+        already_used = inducement_done.get((coin, f"struct_{stype}")) == sig
+        stale = False
+        if not already_used and df_m5 is not None and len(df_m5) > 0:
+            df_after_peak = df_m5[df_m5['ts'] > peak_ts]
+            if len(df_after_peak) > 0:
+                touched_mask = (df_after_peak['low'] <= idm_lvl_cand) if stype == 'Long' \
+                                else (df_after_peak['high'] >= idm_lvl_cand)
+                stale = bool(touched_mask.any())
+        if not already_used and not stale:
+            break   # leg ini valid — belum dipakai & masih fresh
+        if verbose:
+            reason = "sudah pernah di-entry" if already_used else "sudah basi (tersentuh M5 sblm live)"
+            print(f"   {coin}: (struct) BOS {stype} IDM {idm_lvl_cand:.6g} {reason} — coba leg lain")
+        remaining_legs = [lg for lg in remaining_legs if lg is not chosen]
+        if not remaining_legs:
+            chosen = None
+            break
+        chosen = _pick_fvg_backed_idm(remaining_legs, gaps, stype, df_h1_live=df_h1_live, peak_idx=peak_idx)
+    if chosen is None:
+        if verbose:
+            print(f"   {coin}: (struct) BOS {stype} — semua leg IDM di pita sudah pernah dipakai/basi — skip, tunggu BOS baru")
         return None, None
     idm_chk = {'prot': chosen[0], 'prot_idx': chosen[1], 'micro_val': chosen[2], 'micro_idx': chosen[3],
                'n_trigger': len(inband_legs)}
@@ -3727,11 +3761,12 @@ def _find_m5_rbs(df_seg, stype):
 
 
 def _idm_find_strong_break(df, start_i, break_lvl_init, direction, lvl_idx_init=None):
-    """Dari titik start_i dengan level break_lvl_init, 'perdalam' terus level break selama candle
-    berikutnya masih menembusnya (low<=break utk Short/opp cari-rendah, high>=break utk Long).
-    Berhenti begitu ketemu candle yang GAGAL menembus (break 'bertahan') -> itu jadi level break IDM,
-    kembalikan (break_lvl, lvl_idx, index candle retrace pertama setelah break bertahan itu).
-    lvl_idx = index candle yang MENGHASILKAN break_lvl akhir (utk keperluan timestamp asli level)."""
+    """Dari titik start_i dengan level break_lvl_init, level break KANDIDAT terus 'melebar' (makin
+    ekstrem) selama candle di start_i..n masih melampauinya (low<=lvl utk Short, high>=lvl utk Long).
+    Berhenti begitu ketemu candle yang GAGAL melampaui (level 'bertahan' 1 candle) -> itu levelnya
+    jadi BREAK KANDIDAT (BELUM final, masih harus tertembus dulu baru IDM valid — lihat
+    _idm_chain_scan). Return (break_lvl_kandidat, lvl_idx, index candle retrace pertama setelah
+    kandidat bertahan itu). lvl_idx = index candle yang MENGHASILKAN break_lvl akhir."""
     lvl = break_lvl_init; lvl_idx = lvl_idx_init if lvl_idx_init is not None else start_i - 1
     i = start_i
     n = len(df)
@@ -3757,9 +3792,9 @@ def _make_idm_log_fn(setup, coin, stype, opp, prefix=""):
             return
         logged.add(key)
         if event == 'formed':
-            log_entry(f"   {coin} {stype} (struct): {prefix}IDM-{idm_no} {opp} ditemukan — "
+            log_entry(f"   {coin} {stype} (struct): {prefix}IDM-{idm_no} {opp} TERBENTUK (break tertembus) — "
                       f"break={break_lvl:.6g} ({_ts_wib(break_ts)}) ujung={ujung_lvl:.6g} "
-                      f"({_ts_wib(ujung_ts)}) — tunggu ujung tersentuh atau IDM baru terbentuk")
+                      f"({_ts_wib(ujung_ts)}) — terjauh melebar, tunggu ujung tersentuh atau retrace+tertembus lagi")
         elif event == 'touched':
             log_entry(f"   {coin} {stype} (struct): {prefix}IDM-{idm_no} {opp} — ujung IDM sebelumnya "
                       f"({ujung_lvl:.6g} @ {_ts_wib(ujung_ts)}) tersentuh — break IDM-{idm_no} "
@@ -3768,61 +3803,141 @@ def _make_idm_log_fn(setup, coin, stype, opp, prefix=""):
 
 
 def _idm_chain_scan(df, start_i, break_lvl_init, direction, trigger_allowed_from_i=None, log_fn=None, idm_counter_start=1):
-    """Jalankan RANTAI IDM (break diperdalam terus, geser ke IDM berikutnya tiap kali break lama
-    tertembus) MULAI dari start_i, sampai salah satu dari:
-      a) IDM aktif saat ini ujungnya MENYENTUH ujung IDM sebelumnya, DAN index candle penyentuh itu
-         >= trigger_allowed_from_i (kalau None, selalu diizinkan) -> return dict 'trigger'.
+    """Jalankan RANTAI IDM mulai dari start_i, sampai salah satu dari:
+      a) SEJAK sebuah IDM valid formed, ujungnya jadi acuan trigger SEGERA — dicek di SETIAP candle
+         berikutnya (independen dari fase pencarian IDM berikutnya: baik masih cari kandidat, tunggu
+         kandidat tertembus, maupun terjauh sedang melebar). Begitu ada candle yang menyentuh ujung
+         itu (DAN index candle >= trigger_allowed_from_i, kalau diberikan) -> return dict 'trigger'.
       b) Data habis (belum ketemu apapun, butuh candle lebih banyak) -> return None (caller 'keep').
+    ALUR per-IDM (kandidat vs final): break KANDIDAT (level ekstrem yg gagal ditembus 1 candle
+    berikutnya) BELUM jadi IDM — kandidat harus TERTEMBUS DULU oleh candle setelahnya baru IDM VALID
+    terbentuk (break=kandidat, ujung=retrace tertinggi/terendah SEBELUM tertembus, terjauh=level
+    candle PENEMBUS). FILTER: ujung IDM baru harus 'kosong 1 candle ke kiri' (candle tepat sebelum
+    ujung tidak boleh melampauinya) — gagal filter -> IDM ini diabaikan sepenuhnya (prev_ujung/idm_no
+    TIDAK berubah), lanjut cari kandidat baru dari titik terjauh saat ini. Setelah IDM valid formed,
+    TERJAUH terus MELEBAR (TANPA IDM baru) SAMPAI ada retrace (candle gagal melebarkan lagi) -> level
+    terjauh itu jadi BREAK KANDIDAT utk IDM BERIKUTNYA (rekursif).
     direction: arah IDM ini ('Short'=cari break rendah dulu, 'Long'=cari break tinggi dulu) — SAMA
     dengan arah 'opp' selalu (IDM selalu searah opp, sesuai desain: yang dicari IDM utk BOS-m5 opp).
     log_fn(idm_no, break_lvl, break_ts, ujung_lvl, ujung_ts, event): callback opsional dipanggil
-    setiap kali sebuah IDM (break+ujung) selesai diproses dalam rantai — 'event' salah satu dari
-    'formed' (IDM ke-N ketemu, break+ujung sudah ada, tunggu ujung tersentuh/IDM baru terbentuk) atau
-    'touched' (ujung IDM ke-N tersentuh -> trigger, break IDM ke-N ini jadi 'terjauh' acuan)."""
+    setiap kali sebuah IDM (break+ujung) VALID terbentuk ('formed') atau trigger jadi acuan
+    berikutnya ('touched')."""
     n = len(df)
-    break_lvl, break_idx, retrace_i = _idm_find_strong_break(df, start_i, break_lvl_init, direction)
-    if retrace_i >= n:
-        return None   # break pertama belum ketemu — butuh candle lebih banyak
-    prev_ujung = None; prev_ujung_idx = None
+    prev_ujung = None; prev_ujung_idx = None; prev_ujung_idm_no = None
+    prev_terjauh = None; prev_terjauh_idx = None
     idm_no = idm_counter_start
-    while True:
-        ujung_lvl = float(df['high'].iloc[retrace_i] if direction == 'Short' else df['low'].iloc[retrace_i])
-        ujung_idx = retrace_i
-        if log_fn is not None:
-            log_fn(idm_no, break_lvl, float(df['ts'].iloc[break_idx]), ujung_lvl,
-                   float(df['ts'].iloc[ujung_idx]), 'formed')
-        j = retrace_i + 1
-        tertembus_j = None
-        touched_prev_j = None
-        while j < n:
-            is_ext = (df['high'].iloc[j] >= ujung_lvl) if direction == 'Short' else (df['low'].iloc[j] <= ujung_lvl)
-            if prev_ujung is not None and touched_prev_j is None:
-                sentuh = (df['high'].iloc[j] >= prev_ujung) if direction == 'Short' else (df['low'].iloc[j] <= prev_ujung)
-                if sentuh and (trigger_allowed_from_i is None or j >= trigger_allowed_from_i):
-                    touched_prev_j = j
-            tembus_break = (df['low'].iloc[j] <= break_lvl) if direction == 'Short' else (df['high'].iloc[j] >= break_lvl)
-            if tembus_break:
-                tertembus_j = j
-                break
-            if is_ext:
-                ujung_lvl = float(df['high'].iloc[j] if direction == 'Short' else df['low'].iloc[j])
-                ujung_idx = j
-            j += 1
-        if touched_prev_j is not None:
+
+    def _trigger_check(i):
+        """Cek SATU candle index i terhadap prev_ujung. Return dict 'trigger' kalau match, else None."""
+        if prev_ujung is None:
+            return None
+        sentuh = (df['high'].iloc[i] >= prev_ujung) if direction == 'Short' else (df['low'].iloc[i] <= prev_ujung)
+        if sentuh and (trigger_allowed_from_i is None or i >= trigger_allowed_from_i):
+            return i
+        return None
+
+    # ── Kandidat break PERTAMA (belum ada prev_ujung, tidak perlu cek trigger selama fase ini) ──
+    cand_lvl, cand_idx, cand_next_i = _idm_find_strong_break(df, start_i, break_lvl_init, direction)
+    if cand_next_i >= n:
+        return None   # kandidat pertama belum ketemu — butuh candle lebih banyak
+
+    phase = 'wait_touch'   # 'wait_touch' -> tunggu cand_lvl tertembus | 'expand' -> terjauh melebar
+    ujung_lvl = float(df['high'].iloc[cand_next_i] if direction == 'Short' else df['low'].iloc[cand_next_i])
+    ujung_idx = cand_next_i
+    i = cand_next_i + 1
+    terjauh_lvl = None; terjauh_idx = None
+    break_lvl = None; break_idx = None
+
+    while i < n:
+        # ── LANGKAH 1 (SETIAP candle, independen fase): cek trigger dulu ──
+        trig_i = _trigger_check(i)
+        if trig_i is not None:
             if log_fn is not None:
-                log_fn(idm_no, break_lvl, float(df['ts'].iloc[break_idx]), prev_ujung,
-                       float(df['ts'].iloc[prev_ujung_idx]), 'touched')
-            return {'kind': 'trigger', 'idm_break': break_lvl, 'idm_break_idx': break_idx,
-                    'idm_ujung': prev_ujung, 'ujung_idx': prev_ujung_idx, 'trigger_idx': touched_prev_j,
-                    'trigger_ts': float(df['ts'].iloc[touched_prev_j])}
-        if tertembus_j is None:
-            return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': ujung_lvl,
-                    'ujung_idx': ujung_idx, 'idm_no': idm_no}   # IDM aktif, blm ada trigger, butuh candle lagi
-        prev_ujung = ujung_lvl; prev_ujung_idx = ujung_idx
-        break_lvl, break_idx, retrace_i = _idm_find_strong_break(df, tertembus_j, float(df['low'].iloc[tertembus_j] if direction == 'Short' else df['high'].iloc[tertembus_j]), direction)
-        idm_no += 1
-        if retrace_i >= n:
-            return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': None, 'ujung_idx': None, 'idm_no': idm_no}
+                log_fn(prev_ujung_idm_no, prev_terjauh, float(df['ts'].iloc[prev_terjauh_idx]),
+                       prev_ujung, float(df['ts'].iloc[prev_ujung_idx]), 'touched')
+            return {'kind': 'trigger', 'idm_break': prev_terjauh, 'idm_break_idx': prev_terjauh_idx,
+                    'idm_ujung': prev_ujung, 'ujung_idx': prev_ujung_idx, 'trigger_idx': trig_i,
+                    'trigger_ts': float(df['ts'].iloc[trig_i])}
+
+        if phase == 'wait_touch':
+            is_ext = (df['high'].iloc[i] >= ujung_lvl) if direction == 'Short' else (df['low'].iloc[i] <= ujung_lvl)
+            tembus_cand = (df['low'].iloc[i] <= cand_lvl) if direction == 'Short' else (df['high'].iloc[i] >= cand_lvl)
+            if tembus_cand:
+                # ── KANDIDAT TERTEMBUS -> cek FILTER 'ujung kosong 1 candle ke kiri' ──
+                ujung_ok = True
+                if ujung_idx > 0:
+                    prev_c = (float(df['high'].iloc[ujung_idx - 1]) if direction == 'Short'
+                              else float(df['low'].iloc[ujung_idx - 1]))
+                    ujung_ok = (prev_c < ujung_lvl) if direction == 'Short' else (prev_c > ujung_lvl)
+                if not ujung_ok:
+                    # IDM TIDAK VALID — seluruh percobaan retrace ini dianggap TIDAK PERNAH TERJADI
+                    # (bukan cuma IDM-nya yg diabaikan, tapi levelnya juga dianggap bagian dari
+                    # pergerakan LURUS yang sama, TANPA retrace). Kembali ke fase 'expand' dari
+                    # terjauh_lvl LAMA (candle i ini jadi level terjauh baru, krn levelnya SUDAH
+                    # melampaui terjauh_lvl lama — itulah kenapa cand_lvl 'gagal ditembus' tadi
+                    # sempat terlihat spt retrace, padahal cuma bagian dr penurunan yg sama).
+                    if terjauh_lvl is not None:
+                        new_terjauh = float(df['low'].iloc[i] if direction == 'Short' else df['high'].iloc[i])
+                        terjauh_lvl = new_terjauh; terjauh_idx = i
+                        prev_terjauh = terjauh_lvl; prev_terjauh_idx = terjauh_idx
+                        idm_no -= 1   # batalkan kenaikan idm_no dr retrace yg baru saja gagal filter
+                        phase = 'expand'
+                        i += 1
+                        continue
+                    # Belum pernah ada IDM valid sebelumnya (masih IDM pertama) — tanpa terjauh_lvl
+                    # lama, cukup cari kandidat baru dari titik ini (spt semula).
+                    new_cand_lvl = float(df['low'].iloc[i] if direction == 'Short' else df['high'].iloc[i])
+                    cand_lvl, cand_idx, cand_next_i = _idm_find_strong_break(df, i + 1, new_cand_lvl, direction, lvl_idx_init=i)
+                    if cand_next_i >= n:
+                        return {'kind': 'pending', 'idm_break': cand_lvl, 'idm_ujung': None,
+                                'ujung_idx': None, 'idm_no': idm_no}
+                    ujung_lvl = float(df['high'].iloc[cand_next_i] if direction == 'Short' else df['low'].iloc[cand_next_i])
+                    ujung_idx = cand_next_i
+                    i = cand_next_i + 1
+                    continue
+                # ── IDM VALID: break=cand_lvl, ujung=ujung_lvl, terjauh=candle penembus (i) ──
+                break_lvl = cand_lvl; break_idx = cand_idx
+                terjauh_lvl = float(df['low'].iloc[i] if direction == 'Short' else df['high'].iloc[i])
+                terjauh_idx = i
+                if log_fn is not None:
+                    log_fn(idm_no, break_lvl, float(df['ts'].iloc[break_idx]), ujung_lvl,
+                           float(df['ts'].iloc[ujung_idx]), 'formed')
+                # IDM ini langsung jadi acuan trigger SEJAK SEKARANG (candle berikutnya, i+1)
+                prev_ujung = ujung_lvl; prev_ujung_idx = ujung_idx; prev_ujung_idm_no = idm_no
+                prev_terjauh = terjauh_lvl; prev_terjauh_idx = terjauh_idx
+                phase = 'expand'
+                i += 1
+                continue
+            if is_ext:
+                ujung_lvl = float(df['high'].iloc[i] if direction == 'Short' else df['low'].iloc[i])
+                ujung_idx = i
+            i += 1
+            continue
+
+        # phase == 'expand': terjauh melebar terus sampai retrace
+        melebar = (df['low'].iloc[i] <= terjauh_lvl) if direction == 'Short' else (df['high'].iloc[i] >= terjauh_lvl)
+        if not melebar:
+            # retrace! terjauh_lvl jadi break KANDIDAT utk IDM berikutnya, idm_no naik
+            idm_no += 1
+            cand_lvl, cand_idx, cand_next_i = _idm_find_strong_break(df, i, terjauh_lvl, direction, lvl_idx_init=terjauh_idx)
+            if cand_next_i >= n:
+                return {'kind': 'pending', 'idm_break': cand_lvl, 'idm_ujung': None, 'ujung_idx': None, 'idm_no': idm_no}
+            phase = 'wait_touch'
+            ujung_lvl = float(df['high'].iloc[cand_next_i] if direction == 'Short' else df['low'].iloc[cand_next_i])
+            ujung_idx = cand_next_i
+            i = cand_next_i + 1
+            continue
+        terjauh_lvl = float(df['low'].iloc[i] if direction == 'Short' else df['high'].iloc[i])
+        terjauh_idx = i
+        prev_terjauh = terjauh_lvl; prev_terjauh_idx = terjauh_idx
+        i += 1
+
+    # ── Data habis ──
+    if phase == 'wait_touch':
+        return {'kind': 'pending', 'idm_break': cand_lvl, 'idm_ujung': ujung_lvl,
+                'ujung_idx': ujung_idx, 'idm_no': idm_no}
+    return {'kind': 'pending', 'idm_break': break_lvl, 'idm_ujung': ujung_lvl,
+            'ujung_idx': ujung_idx, 'idm_no': idm_no}
 
 
 def process_struct_setup(coin, setup, df_m5):
@@ -4089,18 +4204,24 @@ def process_struct_setup(coin, setup, df_m5):
             return 'keep'
 
         if terjauh_i is not None:
-            # ── Terjauh tertembus (wick) -> BOS BARU: break=ujung lama, ujung=terjauh lama.
-            #    ujung_ts BOS baru = terjauh_ts (timestamp ASLI level terjauh lama), BUKAN fix_ts
-            #    (yang cuma waktu konfirmasi) — supaya window IDM-dalam-BOS berikutnya mulai dari
-            #    titik candle yang benar. ──
-            new_break = bos_ujung; new_ujung = terjauh
-            new_break_ts = float(df_after['ts'].iloc[terjauh_i])
+            # ── Terjauh tertembus (wick) -> BOS BARU: break = terjauh LAMA itu sendiri (dikonfirmasi
+            #    ulang), ujung = level retrace TERTINGGI/TERENDAH yang tercapai SEJAK fix_ts (titik
+            #    trigger IDM sebelumnya tersentuh, INKLUSIF candle fix_ts itu sendiri — persis pola
+            #    BOS PERTAMA yg juga inklusif candle trig_i) SAMPAI titik terjauh_i ini. ──
+            idxs_incl = df_m5.index[(df_m5['ts'] >= fix_ts) & (df_m5.index < closed_end)]
+            start_incl = int(idxs_incl[0])
+            terjauh_ts_new = float(df_after['ts'].iloc[terjauh_i])
+            idxs_ujung_seg = df_m5.index[(df_m5['ts'] >= fix_ts) & (df_m5['ts'] <= terjauh_ts_new)]
+            df_ujung_seg = df_m5.loc[idxs_ujung_seg]
+            new_ujung = float(df_ujung_seg['high'].max() if opp == 'Short' else df_ujung_seg['low'].min())
+            new_break = terjauh
+            new_break_ts = terjauh_ts_new
             log_entry(f"🔄 {coin} {stype} (struct): terjauh ({terjauh:.6g}) tertembus (wick) @ "
                       f"{_ts_wib(new_break_ts)} — geser jadi BOS-m5 baru: break={new_break:.6g} "
-                      f"ujung={new_ujung:.6g}")
+                      f"ujung={new_ujung:.6g} (retrace sejak {_ts_wib(fix_ts)}, inklusif)")
             setup['m5_bos_break'] = new_break; setup['m5_bos_ujung'] = new_ujung
             setup['m5_bos_break_ts'] = new_break_ts
-            setup['m5_bos_ujung_ts'] = terjauh_ts
+            setup['m5_bos_ujung_ts'] = fix_ts
             setup['m5_bos_terjauh'] = None
             setup['m5_choch_invalid_after_ts'] = None
             return 'keep'
@@ -4195,6 +4316,13 @@ def process_struct_setup(coin, setup, df_m5):
                 'choch_level': setup.get('m5_choch_level'), 'peak_val': setup.get('m5_peak'),
                 'swing2': setup.get('m5_swing_val'), 'kind': 'struct',
             }
+            # ── ANTI ENTRY-ULANG: tandai signature (BOS H1 + IDM H1 yang dipakai) sudah di-entry,
+            #    persisten lewat redeploy via save_state(). Signature harus SAMA PERSIS dgn yang
+            #    dicek di build_h1_struct_setup (swing_val, choch_level, idm_level, dibulatkan sama). ──
+            _struct_sig = (round(setup.get('swing_val'), 10), round(setup.get('choch_level'), 10),
+                           round(setup.get('idm_level'), 10))
+            inducement_done[(coin, f"struct_{stype}")] = _struct_sig
+            save_state()
             log_entry(f"════ STRUCT FILLED {stype} {coin} ════\n"
                       f"  entry:{actual_entry:.6f} SL:{sl_p:.6f} | H1 break:{setup.get('swing_val'):.6g} "
                       f"IDM:{setup.get('idm_level'):.6g} | BOS-m5 {opp}:{setup.get('m5_swing_val'):.6g} "
@@ -4597,7 +4725,7 @@ def run_bot():
                             cur = dirs.get(d)
                             if cur is not None and cur.get('phase') in ('WAIT_M5_CHOCH', 'WAIT_FILL'):
                                 continue
-                            cand, cand_log = build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=d)
+                            cand, cand_log = build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=d, df_m5=df_m5_live)
                             if not cand:
                                 continue
                             if cur is None:
@@ -4614,7 +4742,7 @@ def run_bot():
                     for d in ('Long', 'Short'):
                         if ALLOW_HEDGE and _akey(coin, d) in active_positions:
                             continue
-                        cand, cand_log = build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=d)
+                        cand, cand_log = build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_dir=d, df_m5=df_m5_live)
                         if cand:
                             print(cand_log); dirs_new[d] = cand
                     if dirs_new:
