@@ -3760,6 +3760,18 @@ def _find_m5_rbs(df_seg, stype):
     return best
 
 
+def _rbs_ujung(df_seg, stype, rbs):
+    """Cari 'ujung' RBS/SBR — level ekstrem (lawan arah zona) yang tercapai SEJAK candle c1 (titik
+    zona mulai terbentuk) SAMPAI break_idx (titik konfirmasi break), INKLUSIF keduanya. Sama persis
+    konsep 'ujung' pada IDM — dipakai sbg acuan SL (bukan cuma titik konfirmasi/break_idx saja).
+    Untuk Long/RBS: ujung = LOW terendah (support bisa diuji dari bawah sebelum konfirmasi break naik).
+    Untuk Short/SBR: ujung = HIGH tertinggi (resisten bisa diuji dari atas sebelum konfirmasi break turun)."""
+    seg = df_seg.iloc[rbs['c1_idx']:rbs['break_idx'] + 1]
+    if stype == 'Long':
+        return float(seg['low'].min())
+    return float(seg['high'].max())
+
+
 def _idm_find_strong_break(df, start_i, break_lvl_init, direction, lvl_idx_init=None):
     """Dari titik start_i dengan level break_lvl_init, level break KANDIDAT terus 'melebar' (makin
     ekstrem) selama candle di start_i..n masih melampauinya (low<=lvl utk Short, high>=lvl utk Long).
@@ -4188,13 +4200,21 @@ def process_struct_setup(coin, setup, df_m5):
                 log_entry(f"⏸️  {coin} {stype} (struct): RBS/SBR ketemu tapi slot penuh ({active_count}/{MAX_CONCURRENT}) — tunda")
                 return 'keep'
             entry_p = (rbs['zone_hi'] + rbs['zone_lo']) / 2.0
-            sl_p = terjauh
+            # ── SL baru: ujung RBS/SBR (level ekstrem lawan-arah sejak zona terbentuk sampai break),
+            #    ditambah 2% dari RANGE BOS H1 (|choch_level H1 - peak_val H1|) menjauhi entry —
+            #    Short: SL = ujung_SBR + 2%*range_h1 (naik); Long: SL = ujung_RBS - 2%*range_h1 (turun). ──
+            rbs_ujung = _rbs_ujung(df_rbs_seg, stype, rbs)
+            range_h1 = abs(float(setup.get('choch_level')) - float(setup.get('peak_val')))
+            sl_buffer = range_h1 * 0.02
+            sl_p = rbs_ujung + sl_buffer if stype == 'Short' else rbs_ujung - sl_buffer
             side = 'Buy' if stype == 'Long' else 'Sell'
             rbs_label = 'RBS' if stype == 'Long' else 'SBR'
             log_entry(f"🔀 {coin} {stype} (struct): CHoCH {bos_ujung:.6g} pecah (close body) @ "
                       f"{_ts_wib(choch_break_ts)} — {rbs_label} @ [{rbs['zone_lo']:.6g}-{rbs['zone_hi']:.6g}] "
-                      f"(RBS/SBR break internal @ {_ts_wib(df_rbs_seg['ts'].iloc[rbs['break_idx']])}) "
-                      f"→ limit entry@{entry_p:.6g} SL@{sl_p:.6g}")
+                      f"(RBS/SBR break internal @ {_ts_wib(df_rbs_seg['ts'].iloc[rbs['break_idx']])}, "
+                      f"ujung={rbs_ujung:.6g}) → limit entry@{entry_p:.6g} "
+                      f"SL@{sl_p:.6g} (ujung {rbs_label}={rbs_ujung:.6g} {'+' if stype=='Short' else '-'} "
+                      f"2%×range-H1[{range_h1:.6g}]={sl_buffer:.6g})")
             oid = place_limit_order(coin, side, entry_p, sl_p)
             if oid:
                 setup['entry'] = entry_p; setup['sl'] = sl_p; setup['order_id'] = oid
