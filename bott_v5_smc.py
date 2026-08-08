@@ -3679,6 +3679,26 @@ def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_d
         return None, None
     bos_ts = float(df_h1_live['ts'].iloc[bos_idx])
     idm_level = float(idm_chk['prot'])
+
+    # ── GUARD TAMBAHAN: kalau IDM SUDAH tersentuh (histori) DAN SETELAH titik itu PUNCAK (_B) JUGA
+    #    sudah tersentuh/terlewati lagi (histori) -> BOS ini SUDAH TIDAK VALID (basi) — trend sudah
+    #    lanjut lewat puncak setelah manipulasi IDM selesai, bukan lagi struktur yang bisa dientry.
+    #    Dicek pakai M5 (kalau tersedia, lebih presisi) — fallback ke H1 kalau df_m5 tidak diberikan.
+    _chk_df = df_m5 if df_m5 is not None and len(df_m5) > 0 else df_h1_live
+    idm_touch_mask = (_chk_df['low'] <= idm_level) if stype == 'Long' else (_chk_df['high'] >= idm_level)
+    if idm_touch_mask.any():
+        idm_touch_ts = float(_chk_df['ts'][idm_touch_mask].iloc[0])
+        after_idm = _chk_df[_chk_df['ts'] > idm_touch_ts]
+        if len(after_idm) > 0:
+            peak_touch_mask = (after_idm['high'] >= _B) if stype == 'Long' else (after_idm['low'] <= _B)
+            if peak_touch_mask.any():
+                if verbose:
+                    peak_touch_ts = float(after_idm['ts'][peak_touch_mask].iloc[0])
+                    print(f"   {coin}: (struct) BOS {stype} BASI — IDM {idm_level:.6g} tersentuh "
+                          f"@ {_ts_wib(idm_touch_ts)}, lalu puncak {_B:.6g} tersentuh lagi "
+                          f"@ {_ts_wib(peak_touch_ts)} — trend sudah lanjut, skip")
+                return None, None
+
     choch_str = f"{choch_level:.6g}" if choch_level else "—"
     logline = (f"\n🧱 {coin} | BOS(struct) {stype} | break:{swing_val:.6g} puncak:{_B:.6g} CHOCH:{choch_str} | "
                f"IDM(FVG-backed):{idm_level:.6g} ({idm_chk['n_trigger']} leg di pita) | FVG:{len(gaps)} "
