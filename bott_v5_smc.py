@@ -2045,7 +2045,7 @@ def reconstruct_state():
     for coin in SYMBOLS:
         try:
             time.sleep(1)
-            df_h1 = get_data(coin, "60", limit=100)
+            df_h1 = get_data(coin, "60", limit=200)
             if df_h1 is None:
                 continue
             state = replay_h1(coin, df_h1)
@@ -4724,7 +4724,7 @@ def run_bot():
                         cancel_unfavorable_limits(coin)
                     if (not ALLOW_HEDGE) and coin in active_positions:
                         continue
-                    df_h1_live = get_data(coin, "60", limit=100)
+                    df_h1_live = get_data(coin, "60", limit=200)
                     if df_h1_live is None:
                         continue
                     sh_h1, sl_h1 = find_last_swing_bos(df_h1_live)
@@ -4792,7 +4792,7 @@ def run_bot():
                     # Bias H1 (EMA3/EMA20) selalu di-update, terlepas dari status posisi/hedge —
                     # supaya cross H1 tidak pernah terlewat walau slot lagi penuh.
                     if EXPERIMENTAL_H1_BIAS_FILTER:
-                        df_h1_exp = get_data(coin, "60", limit=100)
+                        df_h1_exp = get_data(coin, "60", limit=200)
                         update_h1_bias(coin, df_h1_exp)
                     if ALLOW_HEDGE or coin not in active_positions:
                         df_m5_exp = get_data(coin, "5", limit=300)
@@ -4804,7 +4804,7 @@ def run_bot():
                     cancel_unfavorable_limits(coin)
                 if (not ALLOW_HEDGE) and coin in active_positions:
                     continue
-                df_h1_live = get_data(coin, "60", limit=100)
+                df_h1_live = get_data(coin, "60", limit=200)
                 if df_h1_live is None:
                     continue
                 sh_h1, sl_h1 = find_last_swing_bos(df_h1_live)
