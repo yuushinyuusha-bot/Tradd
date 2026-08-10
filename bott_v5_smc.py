@@ -693,6 +693,9 @@ def calc_atr(df, period=14):
 # Candle yang MENEMBUS swing (breaker) dievaluasi terpisah (lihat closed_h1 = df.iloc[-2])
 # dan TIDAK perlu konfirmasi kanan-5 — cukup close menembus swing yang sudah valid.
 SWING_BARS = 5
+# Fraktal H1 (find_last_swing_bos) dibuat lebih lebar (20-20) daripada SWING_BARS (5-5, dipakai
+# M5/IDM) supaya swing H1 lebih tersaring dari noise dan tidak terlalu sering ganti-ganti struktur.
+SWING_BARS_H1 = 20
 # Fraktal HALUS untuk telusur leg (rebreak/extension) di dalam impuls. Lebih halus dari SWING_BARS
 # supaya swing-2 minor (mis. retrace dangkal lalu rebreak) tetap terbaca, tapi tak sebising bar mentah.
 SUBLEG_BARS = 3
@@ -767,7 +770,7 @@ REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK la
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
 
-def find_last_swing_bos(df, n=SWING_BARS):
+def find_last_swing_bos(df, n=SWING_BARS_H1):
     highs, lows = [], []
     hi = df['high'].values; lo = df['low'].values; ts = df['ts'].values
     for i in range(n, len(df) - n):
@@ -4599,7 +4602,7 @@ def run_bot():
     load_state()   # muat inducement_done dari file (bertahan lewat redeploy/restart)
     print("SMC INTI BOT — " + ("BOS H1 -> IDM touch -> BOS M5 lawan arah -> CHoCH balik -> entry 50%/SL 100% (STRUCT_MODE)"
           if STRUCT_MODE else "BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2"))
-    print(f"CONFIG v9.22 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.22 | swing H1 {SWING_BARS_H1}-{SWING_BARS_H1}/M5 {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
