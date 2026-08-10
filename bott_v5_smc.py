@@ -3717,7 +3717,7 @@ def build_h1_struct_setup(coin, df_h1_live, sh_h1, sl_h1, verbose=False, force_d
         'm5_bos_ujung_ts': None, 'm5_bos_terjauh': None, 'm5_bos_fix_ts': None,
         'm5_bos_terjauh_ts': None,
         'm5_idm_logged': set(),
-        'm5_choch_invalid_after_ts': None,
+        'm5_choch_dead': False,
     }
     return setup, logline
 
@@ -3756,11 +3756,13 @@ def _find_m5_rbs(df_seg, stype):
             hi_j = float(df_seg['high'].iloc[j]); lo_j = float(df_seg['low'].iloc[j])
             cl_j = float(df_seg['close'].iloc[j])
             if not space_found:
-                if stype == 'Long' and hi_j < zone_lo:
+                # Space sah kalau candle TIDAK menembus MASUK ke dalam zona (mentok pas di batas
+                # tetap dianggap space, bukan overlap) -> pakai >=/<= (bukan strict >/<).
+                if stype == 'Long' and hi_j <= zone_lo:
                     space_found = True
-                elif stype == 'Short' and lo_j > zone_hi:
+                elif stype == 'Short' and lo_j >= zone_hi:
                     space_found = True
-                elif not (hi_j < zone_lo or lo_j > zone_hi):
+                elif not (hi_j <= zone_lo or lo_j >= zone_hi):
                     break   # overlap balik SEBELUM sempat ada space -> pola gagal, coba i berikutnya
                 continue
             if break_idx is None:
@@ -4173,21 +4175,17 @@ def process_struct_setup(coin, setup, df_m5):
         if len(df_after) < 1:
             return 'keep'
 
-        # CHoCH: close body tembus ujung (searah stype). Kalau SEBELUMNYA sudah pernah invalid
-        # (gagal RBS/SBR), jangan re-deteksi 'close masih di seberang ujung' tiap siklus (infinite
-        # repeat) — syaratkan close DULU balik ke sisi break_lvl (opp) sebelum candle close-tembus
-        # berikutnya dianggap kejadian BARU.
-        choch_close_mask = (df_after['close'] > bos_ujung) if stype == 'Long' else (df_after['close'] < bos_ujung)
-        invalid_after_ts = setup.get('m5_choch_invalid_after_ts')
-        if invalid_after_ts is not None:
-            back_mask = (df_after['close'] <= bos_ujung) if stype == 'Long' else (df_after['close'] >= bos_ujung)
-            after_invalid = df_after['ts'] > invalid_after_ts
-            back_idx = df_after.index[after_invalid & back_mask]
-            if len(back_idx) == 0:
-                choch_close_mask = choch_close_mask & False   # belum pernah balik lagi — jangan deteksi
-            else:
-                choch_close_mask = choch_close_mask & (df_after.index > int(back_idx[0]))
-        choch_i = int(df_after.index[choch_close_mask][0]) if choch_close_mask.any() else None
+        # CHoCH: close body tembus ujung (searah stype). Kalau CHoCH dari BOS-m5 (bos_ujung/terjauh)
+        # INI PERNAH gagal (tidak ada RBS/SBR di window-nya), struktur ini dianggap MATI PERMANEN —
+        # jangan coba cari CHoCH/RBS-SBR lagi dari bos_ujung & terjauh yang sama, walau harga sempat
+        # retrace balik ke sisi break_lvl lalu maju lagi (dulu ini masih dianggap "kejadian baru" dan
+        # window RBS/SBR-nya cuma melebar dari terjauh_ts LAMA — pasti gagal lagi / spam log berulang).
+        # Satu-satunya jalan lanjut setelah mati: terjauh tertembus (wick) -> BOS-m5 baru (blok di bawah).
+        if setup.get('m5_choch_dead'):
+            choch_i = None
+        else:
+            choch_close_mask = (df_after['close'] > bos_ujung) if stype == 'Long' else (df_after['close'] < bos_ujung)
+            choch_i = int(df_after.index[choch_close_mask][0]) if choch_close_mask.any() else None
 
         # BOS baru: wick tembus terjauh (searah opp)
         terjauh_touch_mask = (df_after['low'] <= terjauh) if opp == 'Short' else (df_after['high'] >= terjauh)
@@ -4212,8 +4210,8 @@ def process_struct_setup(coin, setup, df_m5):
                 log_entry(f"❌ {coin} {stype} (struct): CHoCH pecah @ {bos_ujung:.6g} (BOS-m5 {opp} "
                           f"break={bos_break:.6g} terjauh={terjauh:.6g}) tapi TIDAK ADA RBS/SBR di "
                           f"window {_ts_wib(terjauh_ts)}-{_ts_wib(choch_break_ts)} — "
-                          f"dianggap umpan, batal. Tunggu terjauh({terjauh:.6g}) tersentuh lagi utk BOS-m5 baru.")
-                setup['m5_choch_invalid_after_ts'] = float(df_after['ts'].iloc[choch_i])
+                          f"dianggap umpan, batal PERMANEN. Tunggu terjauh({terjauh:.6g}) tersentuh lagi utk BOS-m5 baru.")
+                setup['m5_choch_dead'] = True
                 return 'keep'
             active_count = len(active_positions) + _count_slots()
             if active_count >= MAX_CONCURRENT:
@@ -4263,7 +4261,7 @@ def process_struct_setup(coin, setup, df_m5):
             setup['m5_bos_break_ts'] = new_break_ts
             setup['m5_bos_ujung_ts'] = fix_ts
             setup['m5_bos_terjauh'] = None
-            setup['m5_choch_invalid_after_ts'] = None
+            setup['m5_choch_dead'] = False   # BOS-m5 baru -> boleh cari CHoCH lagi dari nol
             return 'keep'
 
         return 'keep'
