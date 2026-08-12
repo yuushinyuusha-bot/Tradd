@@ -693,9 +693,8 @@ def calc_atr(df, period=14):
 # Candle yang MENEMBUS swing (breaker) dievaluasi terpisah (lihat closed_h1 = df.iloc[-2])
 # dan TIDAK perlu konfirmasi kanan-5 — cukup close menembus swing yang sudah valid.
 SWING_BARS = 5
-# Fraktal H1 (find_last_swing_bos) dibuat lebih lebar (20-20) daripada SWING_BARS (5-5, dipakai
-# M5/IDM) supaya swing H1 lebih tersaring dari noise dan tidak terlalu sering ganti-ganti struktur.
-SWING_BARS_H1 = 20
+# Fraktal H1 (find_last_swing_bos) — SWING_BARS_H1 dipakai sbg default n, sama dgn SWING_BARS (5-5).
+SWING_BARS_H1 = 5
 # Fraktal HALUS untuk telusur leg (rebreak/extension) di dalam impuls. Lebih halus dari SWING_BARS
 # supaya swing-2 minor (mis. retrace dangkal lalu rebreak) tetap terbaca, tapi tak sebising bar mentah.
 SUBLEG_BARS = 3
@@ -3735,12 +3734,12 @@ def _find_m5_rbs(df_seg, stype):
     candle yang CLOSE menembus balik ke atas zona itu (searah CHoCH) → RBS terkonfirmasi — TAPI kalau
     SETELAH break itu ada candle yang close balik menembus zona ke arah SEBALIKNYA (sweep balik),
     RBS ini batal/tidak valid.
-    Ambil kandidat TERAKHIR (paling baru/dekat dgn sekarang) yang valid — sama seperti rantai BOS-m5
-    & IDM H1 yang selalu pakai leg TERAKHIR, BUKAN yang pertama kali ketemu secara historis (zona lama
-    yang lebih lebar/basi diabaikan kalau ada zona lebih baru yang juga valid).
-    Return dict {zone_hi, zone_lo, c1_idx, c2_idx, break_idx} atau None."""
+    Return LIST semua kandidat valid (urut sesuai kemunculan i, artinya makin ke belakang == makin
+    baru), masing2 dict {zone_hi, zone_lo, c1_idx, c2_idx, break_idx}. Kandidat TERAKHIR di list ini
+    sama seperti sebelumnya == leg paling baru/dekat sekarang — caller yang filter/pilih sesuai
+    kebutuhan (mis. hanya kandidat yang ada EMA cross di dalamnya)."""
     n = len(df_seg)
-    best = None
+    candidates = []
     for i in range(0, n - 2):
         c1_o, c1_c = float(df_seg['open'].iloc[i]), float(df_seg['close'].iloc[i])
         c2_o, c2_c = float(df_seg['open'].iloc[i + 1]), float(df_seg['close'].iloc[i + 1])
@@ -3781,8 +3780,30 @@ def _find_m5_rbs(df_seg, stype):
             if stype == 'Short' and cl_j > zone_hi:
                 break_idx = None; break
         if break_idx is not None:
-            best = {'zone_hi': zone_hi, 'zone_lo': zone_lo, 'c1_idx': i, 'c2_idx': i + 1, 'break_idx': break_idx}
-    return best
+            candidates.append({'zone_hi': zone_hi, 'zone_lo': zone_lo, 'c1_idx': i, 'c2_idx': i + 1, 'break_idx': break_idx})
+    return candidates
+
+
+def _rbs_has_ema_cross(df_seg, stype, rbs):
+    """Cek apakah ada golden cross (Long/RBS) atau death cross (Short/SBR) EMA5xEMA20 di dalam
+    rentang kandidat RBS/SBR ini — dari c1_idx (mulai zona terbentuk) sampai break_idx (terbreak),
+    INKLUSIF keduanya. df_seg WAJIB sudah punya kolom 'ema5'/'ema20' (dihitung dari histori penuh
+    df_m5 sebelum di-slice, supaya EMA-nya matang/stabil, bukan mulai dari nol di titik potong).
+    Golden cross = ema5 silang naik menembus ema20 (ema5 pindah dari <= ke > ema20).
+    Death cross  = ema5 silang turun menembus ema20 (ema5 pindah dari >= ke < ema20)."""
+    if 'ema5' not in df_seg.columns or 'ema20' not in df_seg.columns:
+        return False
+    lo = rbs['c1_idx']; hi = rbs['break_idx']
+    if lo <= 0:
+        lo = 1   # butuh candle sebelumnya (k-1) utk bandingkan crossing di titik k=lo
+    for k in range(lo, hi + 1):
+        e5   = float(df_seg['ema5'].iloc[k]);   e20   = float(df_seg['ema20'].iloc[k])
+        e5p  = float(df_seg['ema5'].iloc[k-1]);  e20p = float(df_seg['ema20'].iloc[k-1])
+        if stype == 'Long' and e5p <= e20p and e5 > e20:
+            return True    # golden cross
+        if stype == 'Short' and e5p >= e20p and e5 < e20:
+            return True    # death cross
+    return False
 
 
 def _rbs_ujung(df_seg, stype, rbs):
@@ -3984,6 +4005,12 @@ def process_struct_setup(coin, setup, df_m5):
     opp = 'Short' if stype == 'Long' else 'Long'
     if df_m5 is None or 'ts' not in df_m5.columns or len(df_m5) < (2 * SWING_BARS + 3):
         return 'keep'
+    # EMA5/EMA20 dihitung dari HISTORI PENUH df_m5 (bukan cuma window RBS/SBR) supaya nilainya
+    # matang/stabil, baru nanti di-slice ikut window RBS/SBR saat dicari cross-nya.
+    if 'ema5' not in df_m5.columns:
+        df_m5['ema5'] = df_m5['close'].ewm(span=5, adjust=False).mean()
+    if 'ema20' not in df_m5.columns:
+        df_m5['ema20'] = df_m5['close'].ewm(span=20, adjust=False).mean()
     n = len(df_m5)
     closed_end = n - 1   # exclude candle M5 yang masih live/berjalan
 
@@ -4208,12 +4235,26 @@ def process_struct_setup(coin, setup, df_m5):
                           f"mulai cari RBS/SBR dari ujung-break")
             idxs_rbs = df_m5.index[(df_m5['ts'] >= terjauh_ts) & (df_m5['ts'] <= choch_break_ts)]
             df_rbs_seg = df_m5.loc[idxs_rbs].reset_index(drop=True)
-            rbs = _find_m5_rbs(df_rbs_seg, stype) if len(df_rbs_seg) >= 3 else None
+            rbs_candidates = _find_m5_rbs(df_rbs_seg, stype) if len(df_rbs_seg) >= 3 else []
+            # Filter: HANYA kandidat RBS/SBR yang di dalam rentangnya (c1_idx..break_idx) ada cross
+            # EMA5xEMA20 searah CHoCH (Long=golden cross, Short=death cross) yang dianggap valid utk
+            # entry. Dari kandidat yang lolos filter, ambil yang PALING BARU (terakhir di list) —
+            # bukan otomatis kandidat RBS/SBR paling akhir kalau dia sendiri tidak ada cross-nya.
+            rbs_ema_candidates = [c for c in rbs_candidates if _rbs_has_ema_cross(df_rbs_seg, stype, c)]
+            rbs = rbs_ema_candidates[-1] if rbs_ema_candidates else None
             if rbs is None:
-                log_entry(f"❌ {coin} {stype} (struct): CHoCH pecah @ {bos_ujung:.6g} (BOS-m5 {opp} "
-                          f"break={bos_break:.6g} terjauh={terjauh:.6g}) tapi TIDAK ADA RBS/SBR di "
-                          f"window {_ts_wib(terjauh_ts)}-{_ts_wib(choch_break_ts)} — "
-                          f"dianggap umpan, batal PERMANEN. Tunggu terjauh({terjauh:.6g}) tersentuh lagi utk BOS-m5 baru.")
+                cross_name = 'golden cross' if stype == 'Long' else 'death cross'
+                if rbs_candidates:
+                    log_entry(f"❌ {coin} {stype} (struct): CHoCH pecah @ {bos_ujung:.6g} (BOS-m5 {opp} "
+                              f"break={bos_break:.6g} terjauh={terjauh:.6g}) — ada {len(rbs_candidates)} "
+                              f"RBS/SBR di window {_ts_wib(terjauh_ts)}-{_ts_wib(choch_break_ts)} tapi TIDAK "
+                              f"ADA yang punya {cross_name} EMA5x20 di dalamnya — dianggap umpan, batal "
+                              f"PERMANEN. Tunggu terjauh({terjauh:.6g}) tersentuh lagi utk BOS-m5 baru.")
+                else:
+                    log_entry(f"❌ {coin} {stype} (struct): CHoCH pecah @ {bos_ujung:.6g} (BOS-m5 {opp} "
+                              f"break={bos_break:.6g} terjauh={terjauh:.6g}) tapi TIDAK ADA RBS/SBR di "
+                              f"window {_ts_wib(terjauh_ts)}-{_ts_wib(choch_break_ts)} — "
+                              f"dianggap umpan, batal PERMANEN. Tunggu terjauh({terjauh:.6g}) tersentuh lagi utk BOS-m5 baru.")
                 setup['m5_choch_dead'] = True
                 return 'keep'
             active_count = len(active_positions) + _count_slots()
