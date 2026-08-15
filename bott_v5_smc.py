@@ -281,7 +281,7 @@ TRAIL_ACT_R      = 9.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
-RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
+RISK_PCT         = 0.02   # risk per trade = 1% dari total equity
 LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
@@ -4026,6 +4026,13 @@ def process_struct_setup(coin, setup, df_m5):
                 touched_idx = i; break
         if touched_idx is None:
             return 'keep'
+        # Candle PENYENTUH IDM itu sendiri (wick-nya nembus IDM, tapi body/close bisa saja masih di
+        # sisi lama) TIDAK ikut jadi bagian window pencarian BOS-M5 arah baru — monitoring baru mulai
+        # dari candle SETELAHNYA (scan_from = touched_idx + 1). Kalau candle berikutnya belum closed
+        # (touched_idx pas di candle terakhir yg sudah closed), tunda dulu -> coba lagi siklus berikut.
+        if touched_idx + 1 >= closed_end:
+            return 'keep'   # candle setelah penyentuh belum closed, tunggu siklus berikutnya
+        scan_from_idx = touched_idx + 1
         # ── Anti-basi: kalau PUNCAK H1 juga SUDAH tersentuh di histori SETELAH IDM tersentuh (bukan
         #    live, baru ketahuan sekarang krn baru dideteksi/redeploy atau tren masih jalan terus),
         #    berarti window IDM->puncak yang ADA SEKARANG sudah lewat & basi — jangan masuk
@@ -4039,14 +4046,15 @@ def process_struct_setup(coin, setup, df_m5):
             after_touch_peak = touch_mask_peak.iloc[touched_idx + 1:closed_end]
             if after_touch_peak.any():
                 return 'keep'   # basi — nunggu swing_val/peak_val ke-update oleh re-deteksi H1 normal
-        setup['m5_scan_from_ts'] = float(df_m5['ts'].iloc[touched_idx])
+        setup['m5_scan_from_ts'] = float(df_m5['ts'].iloc[scan_from_idx])
         setup['phase'] = 'WAIT_M5_CHOCH'
         choch_h1 = setup.get('choch_level'); pk_h1 = setup.get('peak_val')
         log_entry(f"🧱 {coin} {stype} (struct) BOS H1 → break:{setup.get('swing_val'):.6g} "
                   f"CHOCH:{choch_h1:.6g} puncak:{pk_h1:.6g} IDM:{idm_level:.6g} "
                   f"— mulai dimonitor M5")
         log_entry(f"👁️  {coin} {stype} (struct): IDM {idm_level:.6g} tersentuh M5 @ "
-                  f"{_ts_wib(df_m5['ts'].iloc[touched_idx])} → mulai cari BOS M5 arah {opp}")
+                  f"{_ts_wib(df_m5['ts'].iloc[touched_idx])} → mulai cari BOS M5 arah {opp} "
+                  f"dari candle {_ts_wib(df_m5['ts'].iloc[scan_from_idx])}")
         return 'keep'
 
     # ── WAIT_M5_CHOCH: struktur BERLAPIS — BOS punya IDM di dalamnya (dari titik ujung BOS sampai
