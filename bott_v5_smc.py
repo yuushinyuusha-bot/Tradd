@@ -693,8 +693,9 @@ def calc_atr(df, period=14):
 # Candle yang MENEMBUS swing (breaker) dievaluasi terpisah (lihat closed_h1 = df.iloc[-2])
 # dan TIDAK perlu konfirmasi kanan-5 — cukup close menembus swing yang sudah valid.
 SWING_BARS = 5
-# Fraktal H1 (find_last_swing_bos) — SWING_BARS_H1 dipakai sbg default n, sama dgn SWING_BARS (5-5).
-SWING_BARS_H1 = 5
+# Fraktal H1 (find_last_swing_bos) — SWING_BARS_H1 dipakai sbg default n, lebih lebar drpd SWING_BARS
+# (5-5, dipakai M5/IDM) supaya swing H1 lebih tersaring dari noise.
+SWING_BARS_H1 = 20
 # Fraktal HALUS untuk telusur leg (rebreak/extension) di dalam impuls. Lebih halus dari SWING_BARS
 # supaya swing-2 minor (mis. retrace dangkal lalu rebreak) tetap terbaca, tapi tak sebising bar mentah.
 SUBLEG_BARS = 3
